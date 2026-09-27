@@ -99,7 +99,7 @@ app.get("/api/github/repos", async (req, res) => {
 })
 
 
-app.post("/api/github/repos/config", async (req, res) => {
+app.post("/api/github/repo/config", async (req, res) => {
     const { repoFullName, buildCommand, runCommand, installCommand, testCommand } = req.body 
     const installationId = req.installationId
 
