@@ -75,7 +75,7 @@ export const getGithubUser = async (accessToken: string): Promise<GithubUser> =>
     };
 }
 
-function getAppJWT(): string {
+export function getAppJWT(): string {
     const payload = {
         installationId: process.env.GITHUB_INSTALLATION_ID!,
         iss: Math.floor(Date.now() / 1000) - 60,
@@ -89,7 +89,7 @@ function getAppJWT(): string {
 export async function getInstallationOctakit(installationId: string): Promise<Octokit> {
     const appJWT = getAppJWT()
 
-    const response = await axios.post(`https://api/github.com/app/installations${installationId}/access_token`, {
+    const response = await axios.post(`https://api/github.com/app/installations${installationId}/access_tokens`, {
         headers: {
             Authorization: `Bearer ${appJWT}`,
             Accept: "application/vnd.github+json" //github json representation

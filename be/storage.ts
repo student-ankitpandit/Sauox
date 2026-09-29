@@ -12,6 +12,17 @@ export type InstallationData = {
     updatedAt: number;
 };
 
+export interface Session {
+  id: string;
+  installationId: string;
+  repoFullName: string;
+  sandboxId: string;
+  status: "ready" | "running" | "done" | "error" | "suspended" | "resuming";
+  createdAt: string;
+  messages: string[];
+  logs: string[]
+}
+
 const storageFile = join(import.meta.dir, "data", "installations.json");
 
 const readInstallations = async (): Promise<InstallationData[]> => {
@@ -63,27 +74,25 @@ export const storage = {
   },
 };
 
-const storageFile2 = path.join(import.meta.dir, 'data', 'repo-configs.json');
-
+const repoConfigFile = path.join(import.meta.dir, 'data', 'repo-configs.json');
 interface RepoConfig {
     buildCommand?: string;
     testCommand?: string;
     runCommand?: string;
     installCommand?: string;
 }
-
 interface DB {
   [key: string]: RepoConfig;  // keyed by `${installationId}:${repoFullName}`
 }
 
 async function readDB(): Promise<DB> {
   try {
-    const raw = await fs.readFile(storageFile2, 'utf-8');
+    const raw = await fs.readFile(repoConfigFile, 'utf-8');
     return JSON.parse(raw);
   } catch (err: any) {
     if (err.code === 'ENOENT') {
-      await fs.mkdir(path.dirname(storageFile2), { recursive: true });
-      await fs.writeFile(storageFile2, '{}');
+      await fs.mkdir(path.dirname(repoConfigFile), { recursive: true });
+      await fs.writeFile(repoConfigFile, '{}');
       return {};
     }
     throw err;
@@ -91,7 +100,7 @@ async function readDB(): Promise<DB> {
 }
 
 async function writeDB(data: DB): Promise<void> {
-  await fs.writeFile(storageFile2, JSON.stringify(data, null, 2));
+  await fs.writeFile(repoConfigFile, JSON.stringify(data, null, 2));
 }
 
 export function makeKey(installationId: string, repoFullName: string): string {
@@ -110,3 +119,37 @@ export async function saveRepoConfig(installationId: string, repoFullName: strin
   await writeDB(db);
   return db[key];
 }
+
+const sessionFile = path.join(import.meta.dir, 'data', 'sessions.json');
+
+async function readSessions(): Promise<Record<string, Session>> {
+  try {
+    return JSON.parse(await fs.readFile(sessionFile, 'utf-8'));
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      await fs.mkdir(path.dirname(sessionFile), { recursive: true });
+      await fs.writeFile(sessionFile, '{}');
+      return {};
+    }
+    throw err;
+  }
+}
+
+export async function saveSession(session: Session) {
+  const all = await readSessions();
+  all[session.id] = session;
+  await fs.writeFile(sessionFile, JSON.stringify(all, null, 2));
+}
+
+export async function getSession(sessionId: string) {
+  return (await readSessions())[sessionId] ?? null;
+}
+
+export async function listSessions(installationId: string) {
+  const allSessions = (await readSessions()) 
+
+  return Object.values(allSessions)
+    .filter(s => s.installationId == installationId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
+
