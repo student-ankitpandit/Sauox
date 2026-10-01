@@ -1,12 +1,17 @@
 import express from "express"
-import { exchangeCodeForToken, getGithubUser, getInstallationOctakit } from "./lib"
-import { getSession, listSessions, saveRepoConfig, saveSession, storage, type InstallationData } from "./storage"
+import { exchangeCodeForToken, getGithubUser, getInstallationOctokit } from "./lib"
+import { getSession, listSessions, saveSession } from "./session"
+import type { Session } from "./session"
+import { storage, type InstallationData } from "./storage"
+import { saveRepoConfig } from "./repo-configs"
 import axios from "axios"
 import { getAppJWT } from "./lib" 
 import Sandbox from "@e2b/code-interpreter"
 import { randomUUID } from "node:crypto"
+import { stopRequests } from "./agent"
 
 const app = express()
+app.use(express.json())
 
 app.get("/health", (req, res) => {
     res.send({ message: "healthy" })
@@ -72,7 +77,7 @@ app.get("/api/auth/github/callback", async (req, res) => {
         
     } catch (e) {
         console.log(e)
-        return res.json({ 
+        return res.status(500).json({ 
             error: "Failed to authenticate you, Try again" 
         })
     }
@@ -81,7 +86,7 @@ app.get("/api/auth/github/callback", async (req, res) => {
 app.get("/api/github/repos", async (req, res) => {
     const installation_id  = req.query.installation_id as string
 
-    const authToken = await getInstallationOctakit(installation_id)
+    const authToken = await getInstallationOctokit(installation_id)
 
     try {
         const resposRes = await axios.get("https://api.github.com/installation/repositories", {
@@ -95,7 +100,7 @@ app.get("/api/github/repos", async (req, res) => {
         return res.json(data.repositories)
     } catch (e) {
         console.log(e)
-        return res.json({
+        return res.status(500).json({
             error: "Failed to fetch repos"
         })
     }
@@ -116,19 +121,34 @@ app.post("/api/github/repo/config", async (req, res) => {
         return res.json(repoConfigs)
     } catch (e) {
         console.log(e)
-        return res.json({
+        return res.status(500).json({
             error: "Failed to save repo configs"
         })
     }
 })
 
-app.post("/api/app/sessions", async (req, res) => {
+app.post("/api/sessions", async (req, res) => {
     const repoFullName = req.query.repoFullName as string
     const installationId = req.installationId
+    const issueNumber = Number(req.body?.issueNumber ?? req.query.issueNumber)
+    const issueTitle = typeof req.body?.issueTitle === "string"
+        ? req.body.issueTitle
+        : typeof req.query.issueTitle === "string"
+            ? req.query.issueTitle
+            : ""
+    const issueBody = typeof req.body?.issueBody === "string"
+        ? req.body.issueBody
+        : typeof req.query.issueBody === "string"
+            ? req.query.issueBody
+            : ""
     
 
     if (!/^[\w.-]+\/[\w.-]+$/.test(repoFullName)) {
         return res.status(400).json({ error: 'Invalid repo name' });
+    }
+
+    if (!Number.isInteger(issueNumber) || issueNumber < 1 || !issueTitle) {
+        return res.status(400).json({ error: 'Issue number and title are required' });
     }
 
     try {
@@ -144,60 +164,155 @@ app.post("/api/app/sessions", async (req, res) => {
 
         const sandbox = await Sandbox.create({ timeoutMs: 30 * 60 * 1000 })
         const cloneResult = await sandbox.commands.run(
-            `git clone https://x-access-token:${token}@github.com/${repoFullName}.git repo`, {timeoutMs: 120000}
+            `git clone https://x-access-token:${token}@github.com/${repoFullName}.git repo`, {timeoutMs: 120_000}
         )
 
-        const session = {
+        const session: Session = {
             id: randomUUID(),
             installationId,
             repoFullName,
             sandboxId: sandbox.sandboxId,
             status: 'ready' as const,
             createdAt: new Date().toISOString(),
+            issueNumber,
+            issueTitle,
+            issueBody,
             messages: [],
-            logs: [cloneResult.stdout, cloneResult.stderr].filter(Boolean)
+            logs: [],
+        }
+
+        if (cloneResult.stdout) {
+            session.logs.push({ time: new Date().toISOString(), type: "info", text: cloneResult.stdout });
+        }
+        if (cloneResult.stderr) {
+            session.logs.push({ time: new Date().toISOString(), type: "error", text: cloneResult.stderr });
         }
 
         await saveSession(session)
 
-        return res.json(session)
+        return res.json({ message: "Session created" })
     } catch (error) {
         console.log(error)
-        return res.json({ error: "Failed to create session" })
+        return res.status(500).json({ error: "Failed to create session" })
     }
 })
 
-app.get("/api/app/sessions", async (req, res) => {
+app.get("/api/sessions", async (req, res) => {
     const installationId = req.installationId
 
     return res.json(await listSessions(installationId))
 })
 
-app.get("/api/sessions/:id", async (req, res) => {
-    try {
-        const session = await getSession(req.params.id)
+app.get("/api/sessions/:sessionId", async (req, res) => {
+    const sessionId = req.params.sessionId
+    const installationId = req.installationId
 
-        if (!session || session.installationId !== req.installationId) {
+    try {
+        const session = await getSession(sessionId)
+
+        if (!installationId || !session || session.installationId !== installationId) {
             return res.status(404).json({ error: "Session not found" })
         }
 
-        const sandbox = await Sandbox.connect(session.sandboxId)
-        const diffResult = await sandbox.commands.run(
-            "git -C repo diff --no-ext-diff",
-            { timeoutMs: 120000 }
-        )
+        let gitDiff = ""
+
+        try {
+            const sandbox = await Sandbox.connect(session.sandboxId)
+            const diffResult = await sandbox.commands.run("git -C repo add -N . && git -C repo diff HEAD", {
+                timeoutMs: 30000,
+            })
+            
+            gitDiff = diffResult.stdout.slice(0, 200_000)
+        } catch (error) {
+            console.log(error)
+        }
 
         return res.json({
-            session,
+            ...session,
             messages: session.messages,
-            currentGitDiff: diffResult.stdout,
-            executionLogs: session.logs
+            logs: session.logs,
+            gitDiff,
         })
     } catch (error) {
         console.log(error)
-        return res.status(500).json({ error: "Failed to retrieve session" })
+        return res.status(500).json({ error: "Failed to fetch session" })
     }
 })
+
+app.post("/api/sessions/:sessionId/messages", async (req, res) => {
+    const installationId = req.installationId
+    const sessionId = req.params.sessionId
+    const message = typeof req.body?.message === "string"
+        ? req.body.message.trim()
+        : typeof req.body?.content === "string"
+            ? req.body.content.trim()
+            : ""
+
+    if (!message) {
+        return res.status(400).json({ error: "Message is required" })
+    }
+
+    if (message.length > 20_000) {
+        return res.status(400).json({ error: "Message is too long" })
+    }
+
+    try {
+        const session = await getSession(sessionId)
+
+        if (!installationId || !session || session.installationId !== installationId) {
+            return res.status(404).json({ error: "Session not found" })
+        }
+
+        if(session.status === "running") {
+            return res.status(409).json({
+                error: "Session is still running"
+            })
+        }
+
+        if(session.pendingToolCallId) {
+            session.messages.push({
+                role: "tool",
+                tool_call_id: session.pendingToolCallId,
+                content: message,
+            });
+            session.pendingToolCallId = undefined;
+        } else {
+            session.messages.push({ role: "user", content: message });
+        }
+
+        session.logs = [
+            ...(session.logs ?? []),
+            {
+                time: new Date().toISOString(),
+                type: "info",
+                text: "User message received",
+            },
+        ]
+
+        await saveSession(session)
+
+        return res.status(202).json({
+            message,
+            sessionId: session.id,
+            status: session.status
+        })
+    } catch (error) {
+        console.log(error)
+        return res.status(500).json({ error: "Failed to send message" })
+    }
+})
+
+app.post('/api/sessions/:sessionId/stop', async (req, res) => {
+    const session = await getSession(req.params.sessionId);
+    if (!req.installationId || !session || session.installationId !== req.installationId) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
+    if (session.status !== 'running') {
+        return res.status(409).json({ error: 'Session is not running' });
+    }
+    stopRequests.add(session.id);
+    res.json({ stopping: true });
+});
 
 app.listen(3000, () => {
     console.log("server is up and running on port 3000")

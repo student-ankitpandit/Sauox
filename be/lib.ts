@@ -86,7 +86,7 @@ export function getAppJWT(): string {
     return jwt.sign(payload, process.env.GITHUB_PRIVATE_KEY!, { algorithm: "RS256" })
 }
 
-export async function getInstallationOctakit(installationId: string): Promise<Octokit> {
+export async function getInstallationToken(installationId: string): Promise<Octokit> {
     const appJWT = getAppJWT()
 
     const response = await axios.post(`https://api/github.com/app/installations${installationId}/access_tokens`, {
@@ -105,3 +105,8 @@ export async function getInstallationOctakit(installationId: string): Promise<Oc
     return new Octokit({ auth: data.token })
 }
 
+
+export async function getInstallationOctokit(installationId: string): Promise<Octokit> {
+  const token = await getInstallationToken(installationId);
+  return new Octokit({ auth: token });
+}
