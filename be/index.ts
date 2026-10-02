@@ -9,6 +9,7 @@ import { getAppJWT } from "./lib"
 import Sandbox from "@e2b/code-interpreter"
 import { randomUUID } from "node:crypto"
 import { stopRequests } from "./agent"
+import { subscribe } from "./events"
 
 const app = express()
 app.use(express.json())
@@ -313,6 +314,45 @@ app.post('/api/sessions/:sessionId/stop', async (req, res) => {
     stopRequests.add(session.id);
     res.json({ stopping: true });
 });
+
+//still debateable that either we should use SSE or WS
+app.get("/api/session/:sessionId/stream", async (req, res) => {
+    const installationId = req.installationId;
+    const session = await getSession(req.params.sessionId);
+
+    if (!installationId || !session || session.installationId !== installationId) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
+
+    res.set({
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no'
+    })
+
+    res.flushHeaders()
+
+    const send = (event: string, data: unknown, id?: number) => {
+        if(id !== undefined) return res.write(`id: ${id}\n`)
+        res.write(`event: ${event}\n`)
+        res.write(`data: ${JSON.stringify(data)}\n\n`)
+    }
+
+    const lastId = Number(req.header("last-event-id"))
+    const start = Number.isInteger(lastId) ? lastId + 1 : 0
+    session.logs.slice(start).forEach((entry, i) => send('log', entry, start + i))
+    send('status', { status: session.status, prUrl: session.prUrl, branch: session.branch })
+
+    const unsubscribe = subscribe(session.id, e => send(e.type, e.data, e.id))
+
+    const heartbeat = setInterval(() => res.write(': pong\n\n'), 25_000)
+
+    res.on('close', () => {
+        clearInterval(heartbeat)
+        unsubscribe
+    })
+})
 
 app.listen(3000, () => {
     console.log("server is up and running on port 3000")

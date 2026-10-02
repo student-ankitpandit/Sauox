@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import type OpenAI from 'openai';
+import { publish } from './events';
 
 export interface messageType {
     type: string
@@ -32,7 +33,17 @@ export interface LogEntry {
 }
 
 export function log(session: Session, type: LogEntry['type'], text: string) {
-    session.logs.push({ time: new Date().toISOString(), type, text: text.slice(0, 2000) });
+    const entry = { time: new Date().toISOString(), type, text: text.slice(0, 2000) };
+    session.logs.push(entry)
+    publish(session.id, { type: "log", id: session.logs.length -1, data: entry })
+}
+
+export function setStatus(session: Session, status: Session['status']) {
+    session.status = status
+    publish(session.id, { 
+        type: 'status', data: { status, prUrl: session.prUrl, branch: session.branch 
+        } 
+    })
 }
 
 const sessionFile = path.join(import.meta.dir, 'data', 'sessions.json');
