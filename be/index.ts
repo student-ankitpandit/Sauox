@@ -346,7 +346,7 @@ app.get("/api/session/:sessionId/stream", async (req, res) => {
 
     const unsubscribe = subscribe(session.id, e => send(e.type, e.data, e.id))
 
-    const heartbeat = setInterval(() => res.write(': pong\n\n'), 25_000)
+    const heartbeat = setInterval(() => res.write(': ping\n\n'), 25_000)
 
     res.on('close', () => {
         clearInterval(heartbeat)
