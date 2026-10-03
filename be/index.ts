@@ -350,10 +350,12 @@ app.get("/api/session/:sessionId/stream", async (req, res) => {
 
     res.on('close', () => {
         clearInterval(heartbeat)
-        unsubscribe
+        unsubscribe()
     })
 })
 
-app.listen(3000, () => {
+
+
+app.listen(3001, () => {
     console.log("server is up and running on port 3000")
 })
