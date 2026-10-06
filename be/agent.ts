@@ -8,7 +8,7 @@ const openai = new OpenAI();
 
 const MODEL = 'gpt-5';
 const MAX_ITERATIONS = 30;
-export const REPO_DIR = ':D/wsp/projects/ca/be/repo';
+export const REPO_DIR = '/home/user/repo';
 
 // session ids the user asked to stop; checked at the top of every loop iteration
 export const stopRequests = new Set<string>();

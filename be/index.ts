@@ -10,6 +10,8 @@ import Sandbox from "@e2b/code-interpreter"
 import { randomUUID } from "node:crypto"
 import { stopRequests } from "./agent"
 import { subscribe } from "./events"
+import { connectUpStream, ensureRelay, RELAY_PORT } from "./browser-stream"
+import { Readable } from "node:stream"
 
 const app = express()
 app.use(express.json())
@@ -354,7 +356,38 @@ app.get("/api/session/:sessionId/stream", async (req, res) => {
     })
 })
 
+app.get("/api/sessions/:sessionId/stream", async (req, res) => {
+    const session = await getSession(req.params.sessionId);
+    const installationId = req.installationId
+    if (!session || session?.installationId !== installationId) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
 
+    const abort = new AbortController
+    req.on("close", () => abort.abort())
+
+    try {
+        const sandbox = await Sandbox.connect(session.sandboxId)
+        await ensureRelay(sandbox, session.id, 'http://localhost:3000')
+        //I receive the stream as upstream from the sandbox and pipe it to the user
+        const upstream = await connectUpStream(`https://${sandbox.getHost(RELAY_PORT)}/`, abort.signal) 
+
+        res.writeHead(200, {
+            'Content-Type': upstream.headers.get('Content-Type') ?? 'multipart/x-mixed-replace; boundary=frame',
+            'Cache-Control': 'no-cache, no-transform',
+            'X-Accel-Buffering': 'no', 
+        })
+
+        const body = Readable.fromWeb(upstream.body as any)
+        body.on('error', () => res.send())
+        body.pipe(res)
+    } catch (error) {
+        if(!res.headersSent) res.status(502).json({
+            error: 'Browser stream unavailable'
+        })
+    }
+
+})
 
 app.listen(3001, () => {
     console.log("server is up and running on port 3000")
