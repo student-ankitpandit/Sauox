@@ -14,9 +14,9 @@ export interface Session {
     installationId: string;
     repoFullName: string;
     sandboxId: string;
-    issueNumber: number;
-    issueTitle: string;
-    issueBody: string;
+    task: string;
+    title: string;
+    issueNumber?: number;
     status: 'ready' | 'running' | 'waiting_for_input' | 'done' | 'error' | 'stopped';
     createdAt: string;
     messages: OpenAI.Chat.ChatCompletionMessageParam[];

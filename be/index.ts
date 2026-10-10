@@ -1,11 +1,10 @@
 import express from "express"
-import { exchangeCodeForToken, getGithubUser, getInstallationOctokit } from "./lib"
+import { exchangeCodeForToken, getGithubUser, getInstallationOctokit, getInstallationToken } from "./lib"
 import { getSession, listSessions, saveSession } from "./session"
 import type { Session } from "./session"
 import { storage, type InstallationData } from "./storage"
 import { saveRepoConfig } from "./repo-configs"
 import axios from "axios"
-import { getAppJWT } from "./lib" 
 import Sandbox from "@e2b/code-interpreter"
 import { randomUUID } from "node:crypto"
 import { stopRequests } from "./agent"
@@ -15,6 +14,8 @@ import { Readable } from "node:stream"
 
 const app = express()
 app.use(express.json())
+
+const REPO_NAME = /^[\w.-]+\/[\w.-]+$/;
 
 app.get("/health", (req, res) => {
     res.send({ message: "healthy" })
@@ -130,75 +131,94 @@ app.post("/api/github/repo/config", async (req, res) => {
     }
 })
 
-app.post("/api/sessions", async (req, res) => {
-    const repoFullName = req.query.repoFullName as string
-    const installationId = req.installationId
-    const issueNumber = Number(req.body?.issueNumber ?? req.query.issueNumber)
-    const issueTitle = typeof req.body?.issueTitle === "string"
-        ? req.body.issueTitle
-        : typeof req.query.issueTitle === "string"
-            ? req.query.issueTitle
-            : ""
-    const issueBody = typeof req.body?.issueBody === "string"
-        ? req.body.issueBody
-        : typeof req.query.issueBody === "string"
-            ? req.query.issueBody
-            : ""
+app.post('/api/app/sessions', async (req, res) => {
+    const installationId = req.installationId;
+    if (!installationId) return res.status(401).json({ error: 'Not authenticated' });
     
-
-    if (!/^[\w.-]+\/[\w.-]+$/.test(repoFullName)) {
+    const { repoFullName } = req.body ?? {};
+    const rawTask = typeof req.body?.task === 'string' ? req.body.task.trim() : '';
+    const hasIssue = req.body?.issueNumber != null && req.body.issueNumber !== '';
+    const issueNumber = hasIssue ? Number(req.body.issueNumber) : undefined;
+    
+    if (typeof repoFullName !== 'string' || !REPO_NAME.test(repoFullName)) {
         return res.status(400).json({ error: 'Invalid repo name' });
     }
-
-    if (!Number.isInteger(issueNumber) || issueNumber < 1 || !issueTitle) {
-        return res.status(400).json({ error: 'Issue number and title are required' });
+    if (!rawTask && issueNumber === undefined) {
+        return res.status(400).json({ error: 'Provide a task, an issueNumber, or both' });
     }
-
+    if (issueNumber !== undefined && (!Number.isInteger(issueNumber) || issueNumber < 1)) {
+        return res.status(400).json({ error: 'issueNumber must be a positive integer' });
+    }
+    if (rawTask.length > 10_000) {
+        return res.status(400).json({ error: 'task is too long' });
+    }
+    
     try {
-        const appJWT = getAppJWT()
-        const response = await axios.post(`https://api.github.com/app/installations/${installationId}/access_tokens`, null, {
-            headers: {
-                Authorization: `Bearer ${appJWT}`,
-                Accept: "application/vnd.github+json"
-            }
-        })
+        let title = rawTask.split('\n')[0].slice(0, 80);
+        let task = rawTask;
+    
+        if (issueNumber !== undefined) {
+        const octokit = await getInstallationOctokit(installationId);
+        const [owner, repo] = repoFullName.split('/');
 
-        const token = response.data.token as string 
-
-        const sandbox = await Sandbox.create({ timeoutMs: 30 * 60 * 1000 })
-        const cloneResult = await sandbox.commands.run(
-            `git clone https://x-access-token:${token}@github.com/${repoFullName}.git repo`, {timeoutMs: 120_000}
-        )
-
+        if (!owner || !repo) {
+            return res.status(400).json({ error: 'Repo name is required' });
+        }
+    
+        const issue = await octokit.rest.issues
+            .get({ owner, repo, issue_number: issueNumber })
+            .then(r => r.data)
+            .catch(err => {
+            if (err.status === 404) return null;
+            throw err;
+            });
+    
+        if (!issue) return res.status(404).json({ error: `Issue #${issueNumber} not found` });
+        if (issue.pull_request) {
+            return res.status(400).json({ error: `#${issueNumber} is a pull request, not an issue` });
+        }
+    
+        title = issue.title;
+        task =
+            `GitHub issue #${issueNumber}: ${issue.title}\n\n${(issue.body ?? '').slice(0, 20_000)}` +
+            (rawTask ? `\n\nAdditional instructions from the user:\n${rawTask}` : '');
+        }
+    
+        const token = await getInstallationToken(installationId);
+    
+        const sandbox = await Sandbox.create({ timeoutMs: 30 * 60 * 1000 });
+        try {
+            await sandbox.commands.run(
+            `git clone https://x-access-token:${token}@github.com/${repoFullName}.git repo`,
+            { timeoutMs: 120_000 }
+        );
+        } catch (err: any) {
+            await sandbox.kill().catch(() => {});
+            throw new Error(`git clone failed: ${String(err.stderr ?? err.message).split(token).join('***')}`);
+        }
+    
         const session: Session = {
             id: randomUUID(),
             installationId,
             repoFullName,
             sandboxId: sandbox.sandboxId,
-            status: 'ready' as const,
+            task,
+            title,
+            issueNumber,// undefined for free-text tasks (dropped when saved as JSON)
+            status: 'ready',
             createdAt: new Date().toISOString(),
-            issueNumber,
-            issueTitle,
-            issueBody,
             messages: [],
             logs: [],
-        }
-
-        if (cloneResult.stdout) {
-            session.logs.push({ time: new Date().toISOString(), type: "info", text: cloneResult.stdout });
-        }
-        if (cloneResult.stderr) {
-            session.logs.push({ time: new Date().toISOString(), type: "error", text: cloneResult.stderr });
-        }
-
-        await saveSession(session)
-
-        return res.json({ message: "Session created" })
-    } catch (error) {
-        console.log(error)
-        return res.status(500).json({ error: "Failed to create session" })
+        };
+        await saveSession(session);
+    
+        res.status(201).json(session);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to create session' });
     }
-})
+    
+});
 
 app.get("/api/sessions", async (req, res) => {
     const installationId = req.installationId
@@ -369,6 +389,7 @@ app.get("/api/sessions/:sessionId/stream", async (req, res) => {
     try {
         const sandbox = await Sandbox.connect(session.sandboxId)
         await ensureRelay(sandbox, session.id, 'http://localhost:3000')
+
         //I receive the stream as upstream from the sandbox and pipe it to the user
         const upstream = await connectUpStream(`https://${sandbox.getHost(RELAY_PORT)}/`, abort.signal) 
 
